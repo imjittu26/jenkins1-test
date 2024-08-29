@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.pure.GithubRepoCheckoutSpec" tests="3" skipped="0" failures="3" errors="0" timestamp="2024-08-28T06:53:16" hostname="jkotapati--MacBookPro18" time="0.272">
+  <properties/>
+  <testcase name="test checkoutGithubRepo for pull request" classname="com.pure.GithubRepoCheckoutSpec" time="0.261">
+    <failure message="groovy.lang.MissingMethodException: No signature of method: com.pure.GithubRepoCheckout.getBaseRepoUrl() is applicable for argument types: () values: []" type="groovy.lang.MissingMethodException">groovy.lang.MissingMethodException: No signature of method: com.pure.GithubRepoCheckout.getBaseRepoUrl() is applicable for argument types: () values: []
+	at app//com.pure.GithubRepoCheckout.checkoutGithubRepo(GithubRepoCheckout.groovy:11)
+	at com.pure.GithubRepoCheckoutSpec.test checkoutGithubRepo for pull request(GithubRepoCheckoutSpec.groovy:22)
+</failure>
+  </testcase>
+  <testcase name="test checkoutGithubRepo for non pull request" classname="com.pure.GithubRepoCheckoutSpec" time="0.002">
+    <failure message="groovy.lang.MissingMethodException: No signature of method: com.pure.GithubRepoCheckout.getScm() is applicable for argument types: () values: []&#10;Possible solutions: getAt(java.lang.String), getScript(), each(groovy.lang.Closure), getClass(), notify(), every()" type="groovy.lang.MissingMethodException">groovy.lang.MissingMethodException: No signature of method: com.pure.GithubRepoCheckout.getScm() is applicable for argument types: () values: []
+Possible solutions: getAt(java.lang.String), getScript(), each(groovy.lang.Closure), getClass(), notify(), every()
+	at com.pure.GithubRepoCheckoutSpec.test checkoutGithubRepo for non pull request(GithubRepoCheckoutSpec.groovy:48)
+</failure>
+  </testcase>
+  <testcase name="test checkoutGithubRepo with exception" classname="com.pure.GithubRepoCheckoutSpec" time="0.009">
+    <failure message="groovy.lang.MissingMethodException: No signature of method: com.pure.GithubRepoCheckout.getBaseRepoUrl() is applicable for argument types: () values: []" type="groovy.lang.MissingMethodException">groovy.lang.MissingMethodException: No signature of method: com.pure.GithubRepoCheckout.getBaseRepoUrl() is applicable for argument types: () values: []
+	at app//com.pure.GithubRepoCheckout.checkoutGithubRepo(GithubRepoCheckout.groovy:11)
+	at com.pure.GithubRepoCheckoutSpec.test checkoutGithubRepo with exception(GithubRepoCheckoutSpec.groovy:67)
+</failure>
+  </testcase>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

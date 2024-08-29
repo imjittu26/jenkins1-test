@@ -1,0 +1,159 @@
+def prepare_docker = {
+  sh '''
+      #!/bin/bash
+      set -x
+      export
+      env
+      D14=\$($TOOLS_DIR/bin/run_14.04 echo "14.04 working")
+      D18=\$($TOOLS_DIR/bin/run_18.04 echo "18.04 working")
+      D20=\$($TOOLS_DIR/bin/run_20.04 echo "20.04 working")
+      D22=\$($TOOLS_DIR/bin/run_22.04 echo "22.04 working")
+
+      # We do not want to exit on non-zero here.
+      set +e
+
+      rm *.zip *.bin *.tgz
+
+      # ------------ DOCKER TOOLCHAIN ------------
+      set -e
+      # Is this really required? Can we assume that the tools already exist on the nodes?
+      \$TOOLS_DIR/docker/deploy.sh local
+
+
+      # Check that dockers are running.
+      if echo \$D14 && echo \$D18 && echo \$D20 && echo \$D22; then echo \$D_GOOD; else echo \$D_BAD; exit 1; fi	
+      # ------------ END DOCKER TOOLCHAIN ------------
+    '''.stripIndent()
+}
+
+def prepare_workspace = {
+  sh '''
+    #!/bin/bash
+    set -x
+
+    # --------- START WORKSPACE CHECKS -------------
+    # Use allocated workspace.
+    cd \$WORKSPACE
+    echo WORKSPACE \$WORKSPACE
+    ls -lah
+    FREE_SPACE_GB=\$(df  . -B \$((1024*1024*1024)) | grep "Filesystem" -v | awk --  '{ print \$4 }')
+
+    # Check for feee space on the node.
+    if [ \$FREE_SPACE_GB -lt 5 ]; then echo \$S_MESS; df . -h; exit 1; fi
+
+    # Check and fix ubuntu_ver.
+    if [ -n "\$ubuntu_ver" ]; then export UBUNTU_VER=\$ubuntu_ver; fi
+
+    # Non-root user will need to copy the root key to the docker image.
+    if [ \$(id -u) -eq 0 ]; then \$TOOLS_DIR/bin/drun mkdir -p /root/.ssh; cp /root/.ssh/config docker_ssh_config; \$TOOLS_DIR/bin/drun cp docker_ssh_config /root/.ssh/config; fi
+    # ----------- END WORKSPACE CHECKS -------------
+  '''.stripIndent()
+}
+
+def build_firmware = {
+  sh '''
+    #!/bin/bash
+    set -x
+
+    # Please note that the ccache is in each of the docker containers as we run as root
+    echo "ls " \$TOOLS_DIR/bin
+    ls \$TOOLS_DIR/bin
+    nice make -s release FIRMWARE_TOOLS_PATH=\$TOOLS_DIR/bin
+
+    # Get the md5's
+    echo "Getting the MD5 files."
+    find build/wssd-fw-* -name "*.z" -or  -name "*.bin" | sort | xargs md5sum | tee \$WORKSPACE/wssd-fw.md5
+
+    # Does not exist in g4 build.
+    if [ -d EFC/Board/sbl_image ]; then cp -v EFC/Board/sbl_image/sbl*.bin \$WORKSPACE/; fi
+
+    echo "Copy the files (wssd-*.zip wssd-*.tgz) to the " \$WORKSPACE/
+    # cp -v wssd-*.zip wssd-*.tgz \$WORKSPACE/
+
+    set +e # ignore errors from this point
+    # delete intermediate files
+    find EFC -name '*.[do]' -exec rm {} \\;
+  '''.stripIndent()
+}
+
+def code_coverage = {
+  sh '''
+    #!/bin/bash
+    set -x
+    set -e
+    nice \$TOOLS_DIR/bin/make -s code_coverage_g4
+  '''.stripIndent()
+}
+
+def unzip_firmware = {
+  sh '''
+    #!/bin/bash
+    set -x
+    set +e
+    pwd
+    ls -l
+    # Clean up
+
+    # Unzip all the files.
+    for z in wssd-*.zip; do echo UNZIP \$z; unzip -q -o \$z; done
+  '''.stripIndent()
+}
+
+pipeline {
+  agent none
+  environment {
+    BASE_REPO_URL = "https://github.com/PURE-Firmware/tungsten-ssd-firmware"
+    PLT_FIRMWARE_REPO_URL = "https://github.com/PURE-Firmware/firmware-plt"
+    TOOLS_DIR = "/opt/firmware_tools"
+    TOOLS_BRANCH = "master"
+    LANG = "C"
+    D_GOOD = "Seems all Dockers are working!"
+    D_BAD = "Docker is not working!"
+    S_MESS = "NOT ENOUGH FREE SPACE TO CONTINUE!"
+    PREC_TIMEOUT='240'
+    AUTO_CLEANUP=1
+    g4_regex="(release\\-4|master)"
+  }
+  stages {
+    stage ("BuildFirmware") {
+      agent {
+        label "ubuntu_1804_background"
+      }
+      options {
+        skipDefaultCheckout true
+      }
+      steps {
+        timestamps {
+          script {
+            prepare_docker()
+            cleanWs()
+            prepare_workspace()
+            // Checkout out base repository and fetch tags?
+            checkout([
+              $class: 'GitSCM',
+              branches: [[name: '**']],
+              extensions: [],
+              userRemoteConfigs: [[
+                credentialsId: 'ghe-app-cred',
+                url: "${env.BASE_REPO_URL}"
+              ]]
+            ])
+            // Checkout pull request.
+            checkout([
+              $class: 'GitSCM',
+              branches: [[name: "FETCH_HEAD"]],
+              extensions: [[$class: 'LocalBranch']],
+              userRemoteConfigs: [[
+                refspec: "+refs/pull/${CHANGE_ID}/head:refs/remotes/origin/${BRANCH_NAME}",
+                credentialsId: 'ghe-app-cred',
+                url: "${env.PLT_FIRMWARE_REPO_URL}"
+              ]]
+            ])
+            build_firmware()
+          }
+        }
+        archiveArtifacts(artifacts: 'results.xml,sbl*.bin,wssd*.zip,wssd-*.tgz,wssd-fw.md5', followSymlinks: false, fingerprint: true)
+      }
+    }
+  }
+}

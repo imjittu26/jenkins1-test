@@ -1,0 +1,409 @@
+@Library('shared-library2') _
+
+def (run_test_name, is_runtest) = getRunTest()
+def release_branch = getReleaseBranch()
+def is_pull_request = isPullRequest()
+def job_url = getJobUrl()
+def ghe_status = 'pending'
+def distro_version = "20.04"
+
+pipeline {
+  agent none
+  environment {
+    FIRMWARE_TOOLS_PATH = "/opt/firmware_tools/"
+    FW_BUILD_CONTAINERS_PATH = "/opt/fw_build_containers/"
+    FW_BUILD_CONTAINERS_REPO = "https://github.com/PURE-Firmware/fw-build-containers/"
+    FW_BUILD_CONTAINERS_BRANCH = "master"
+    LANG = "C"
+    D_GOOD = "Seems all Dockers are working!"
+    D_BAD = "Docker is not working!"
+    PREC_TIMEOUT='240'
+    AUTO_CLEANUP=1
+    g4_regex="(release\\-4|master)"
+    clean_up_results="clean_up_results"
+    env_file="env_file.txt"
+    precommit_results="results"
+    fake_tag="release-9.9.99"
+    custom_job_name_master="docker-code-review-wssd.targeted_test-wssd.custom-docker_master"
+    FW_TEST_9999="debug"
+    PURE_FIRMWARE_CRED="ghe-app-cred"
+    RELEASE_TEST_ARTIFACTS_TO_COPY="wssd*4.99.99*"
+    TEST_ARTIFACTS_TO_COPY="wssd-*.zip"
+  }
+  stages {
+    // Need plugin https://plugins.jenkins.io/pipeline-github/releases/
+    stage ("FirmwareBuildAndCoverage") {
+      parallel {
+        stage ("BuildFirmware") {
+          agent {
+            label "ubuntu_1804_background"
+          }
+          options {
+            timeout(time: 24, unit: 'HOURS')
+            checkoutToSubdirectory("build_firmware")
+            skipDefaultCheckout(true)
+          }
+          steps {
+            timestamps {
+              script {
+                echo "Stage: ${env.STAGE_NAME}; NODE_NAME = ${env.NODE_NAME}"
+                echo "PWD ${PWD}"
+                // Retrieve the Repo. For PRs that will require a merge with the base branch.
+                dir ("${env.WORKSPACE}/build_firmware") {
+                  // Checkout Repo and set statuses.
+                  checkoutGithubRepo()
+                  checkPureAstyle()
+                  setChecksPending()
+
+                  // Basic preparations.
+                  prepareDocker()
+                  prepareWorkspace()
+                  echo "Start clean workspace"
+                  cleanWorkspace()
+                  
+                  echo "End clean workspace"
+                  setSshKeyToDocker()
+
+                  buildFirmware()
+
+                  echo "Getting the MD5 files."
+                  sh "find ${env.WORKSPACE}/build_firmware/build/wssd-fw-* -name '*.z' -or  -name '*.bin' | sort | xargs md5sum | tee ${env.WORKSPACE}/build_firmware/wssd-fw.md5"
+
+                  // Success so we can copy files over.
+                  // Copy files over to the workspace. We need plug-in file-operations
+                  fileOperations([fileCopyOperation(
+                    flattenFiles: false,
+                    includes: 'wssd-*.zip,wssd-*.tgz',
+                    targetLocation: "${env.WORKSPACE}"
+                  )])
+
+                  // Change build description and status
+                  changeBuildDescription()
+                  cleanWs()
+                }
+              }
+            }
+          }
+        }
+        stage ("CodeCoverage") {
+          agent {
+            label "ubuntu_1804_background"
+          }
+          options {
+            timeout(time: 24, unit: 'HOURS')
+            checkoutToSubdirectory("code_coverage")
+            skipDefaultCheckout(true)
+          }
+          when {
+            branch pattern: 'PR-\\d+.*|master|release-4\\..*|feature.plt', comparator: "REGEXP"
+          }
+          steps {
+            timestamps {
+              script {
+                echo "Stage: ${env.STAGE_NAME}; NODE_NAME = ${env.NODE_NAME}"
+                if (is_pull_request) {
+                  if ('skip_code_coverage' in pullRequest.labels.toList()) {
+                    echo "skip_code_coverage label set. Skipping code coverage."
+                    return 0
+                  }
+                }
+                if (is_runtest) {
+                  echo "RUNTEST Skipping code coverage."
+                  return 0
+                }
+                echo "PWD ${PWD}"
+                sh "ls -lah"
+                // Use CHANGE_TARGET if PR and need to get branch.
+                dir ("${env.WORKSPACE}/code_coverage") {
+                  try {
+                    setChecksPending()
+
+                    // Clean before
+                    cleanWs()
+                    fileOperations([folderCreateOperation("code_coverage")])
+                    echo "PWD ${PWD}"
+                    sh "ls -lah"
+
+                    // Retreive the Repo. For PRs that will require a merge with the base branch.
+                    checkoutGithubRepo()
+
+                    prepareDocker()
+                    prepareWorkspace()
+                    setSshKeyToDocker()
+                    cleanWorkspace()
+                    buildCodeCoverage()
+                  }
+                  catch (excd) {
+                    if (is_pull_request) {
+                      echo "${excd}"
+                      error("Marking Code Coverage build as failed.")
+                    }
+                    else {
+                      echo "Failed on non PR so so failure and move on."
+                      echo "${excd}"
+                    }
+                  }
+                  finally {
+                    cleanWs()
+                  }
+                }
+              }
+            }
+          }
+        }
+        stage("TestRelease") {
+          when {
+            // The base branch is master, release-4.1.x, or a pull request.
+            branch pattern: 'master|PR-\\d+.*', comparator: "REGEXP"
+          }
+          options {
+            timeout(time: 24, unit: 'HOURS')
+            checkoutToSubdirectory("test_release")
+            skipDefaultCheckout(true)
+          }
+          agent {
+            label "ubuntu_1804_background"
+          }
+          steps {
+            timestamps {
+              script {
+                echo "Stage: ${env.STAGE_NAME}; NODE_NAME = ${env.NODE_NAME}"
+                // We should not get here unless the "when" clause is changed.
+                if (is_pull_request) {
+                  echo "Full list of labels: ${pullRequest.labels.toList()}"
+                  if ('skip_test_release' in pullRequest.labels.toList()) {
+                    echo "skip_test_release label set. Skipping test release."
+                    return 0
+                  }
+                  if ('is_pr_tagged_release' in pullRequest.labels.toList()) {
+                    echo "is_pr_tagged_release label is set."
+                  }
+                  else {
+                    echo "Skipping skipping test release a the is_pr_tagged_release is not set"
+                    return 0
+                  }
+                }
+                dir("test_release") {
+                  cleanWs()
+                  setChecksPending()
+
+                  // Checkout SCM. master and branches only for this stage.
+                  checkoutGithubRepo()
+                  prepareDocker()
+                  prepareWorkspace()
+                  cleanWorkspace()
+                  setSshKeyToDocker()
+                  buildTestRelease()
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    stage("PrecommitPreparationAndCheck") {
+      when {
+        branch pattern: 'PR-\\d+.*', comparator: "REGEXP"
+      }
+      options {
+        timeout(time: 24, unit: 'HOURS')
+      }
+      agent {
+        label "ubuntu_1804_background"
+      }
+      steps {
+        timestamps {
+          script {
+            echo("Preparation for the next steps.")
+
+            // Create a pending status if we made it here:
+            // https://javadoc.jenkins.io/plugin/workflow-support/org/jenkinsci/plugins/workflow/support/steps/build/RunWrapper.html
+            if (is_pull_request) {
+              setChecksPending()
+
+              // Check and kick us out
+              if ('skip_precommit' in pullRequest.labels.toList() ) {
+                if (release_branch.startsWith("master") || release_branch.startsWith("release")) {
+                  unstable(message: "Precommit is required now!")
+                  pullRequest.createStatus(
+                    status: 'error',
+                    context: "fwjenkins2/stage/${STAGE_NAME.toLowerCase()}",
+                    description: "Requires precommit to run in master and release branches.",
+                    targetUrl: "${job_url}/build/${BUILD_NUMBER}"
+                  )
+                }
+              }
+            }
+
+            // Run if pull request and proper label is set.
+            if (! ("is_merge_ready" in pullRequest.labels.toList())) {
+              echo "Please add 'is_merge_ready' label to the pull request to run the precommit check."
+              unstable(message: "${STAGE_NAME} is needed 'is_merge_ready' label.")
+              pullRequest.createStatus(status: 'error',
+                context: "fwjenkins2/stage/${STAGE_NAME.toLowerCase()}",
+                description: "Requires precommit to run in master and release branches.",
+                targetUrl: "${job_url}/build/${BUILD_NUMBER}")
+              return
+            }
+
+            if (is_pull_request) {
+              pullRequest.createStatus(status: 'success',
+                context: "fwjenkins2/stage/${STAGE_NAME.toLowerCase()}",
+                description: "${STAGE_NAME}: passed",
+                targetUrl: "${job_url}/build/${BUILD_NUMBER}"
+              )
+            }
+          }
+        }
+      }
+    }
+    stage ("SanityChecks") {
+      parallel {
+        stage("PrecommitRuntest") {
+          when {
+            branch pattern: 'PR-\\d+.*', comparator: "REGEXP"
+          }
+          agent {
+            label "ubuntu_1804_mass_executor"
+          }
+          options {
+            timeout(time: 24, unit: 'HOURS')
+          }
+          steps {
+            timestamps {
+              step([
+                  $class: 'CopyArtifact',
+                  excludes: 'wssd-ext-tools*.zip',
+                  filter: 'wssd-*.zip',
+                  fingerprintArtifacts: true,
+                  optional: true,
+                  projectName: env.JOB_NAME,
+                  selector: [$class: 'SpecificBuildSelector',
+                            buildNumber: env.BUILD_NUMBER]
+              ])
+              script {
+                // Create a pending status if we made it here:
+                // https://javadoc.jenkins.io/plugin/workflow-support/org/jenkinsci/plugins/workflow/support/steps/build/RunWrapper.html
+                echo "Stage: ${env.STAGE_NAME}; NODE_NAME = ${env.NODE_NAME}"
+                setChecksPending()
+
+                if (is_runtest) {
+                  // Support only master and 4.1.x for now
+                  // Are the artifacts being copied here?
+                  runRunTestJob()
+                }
+                else {
+                  if (is_pull_request) {
+                    if ('skip_precommit' in pullRequest.labels.toList()) {
+                      if (release_branch.startsWith("master") || release_branch.startsWith("release")) {
+                        unstable(message: "Precommit is required now!")
+                        // Announce error
+                        pullRequest.createStatus(
+                          status: 'error',
+                          context: "fwjenkins2/stage/${STAGE_NAME.toLowerCase()}",
+                          description: "Requires precommit to run in master and release branches. Please remove the 'skip_precommit' label to proceed.",
+                          targetUrl: "${job_url}/build/${BUILD_NUMBER}"
+                        )
+                      }
+                      pullRequest.createStatus(
+                        status: 'success',
+                        context: "fwjenkins2/stage/${STAGE_NAME.toLowerCase()}",
+                        description: "skipped precommit and not required for non release and master branches.",
+                        targetUrl: "${job_url}/build/${BUILD_NUMBER}"
+                      )
+                      return 0
+                    }
+                  }
+                  if (is_pull_request) {
+                    if (!('is_merge_ready' in pullRequest.labels.toList())) {
+                      echo "Please add 'is_merge_ready' label to the pull request to run the precommit check."
+                      unstable(message: "${STAGE_NAME} is needed 'is_merge_ready' label.")
+                      pullRequest.createStatus(
+                        status: 'error',
+                        context: "fwjenkins2/stage/${STAGE_NAME.toLowerCase()}",
+                        description: "${STAGE_NAME} - Requires precommit to run in master and release branches. Please add the 'is_merge_ready' label to run the check.",
+                        targetUrl: "${job_url}/build/${BUILD_NUMBER}"
+                      )
+                      return 0
+                    }
+                  }
+
+                  // Default precommit job name.
+                  def precommit_job = "docker-code-review-wssd.targeted_test-wssd.code-precommit"
+                  distro_version = "20.04"
+                  def testbed_label = "wssd_precommit"
+                  def test_name = "wssd.precommit_g4_test"
+                  (precommit_job, distro_version, testbed_label, test_name) = determinePrecommitParameters()
+                  runPrecommitTest(precommit_job:precommit_job, testbed_label:testbed_label, test_name:test_name, distro_version:distro_version)
+                }
+              }
+            }
+          }
+        }
+        stage("SimulatorSanityTest") {
+          when {
+            branch pattern: 'PR-\\d+.*', comparator: "REGEXP"
+          }
+          agent {
+            label "ubuntu_1804_mass_executor"
+          }
+          options {
+            timeout(time: 6, unit: 'HOURS')
+          }
+          steps {
+            timestamps {
+              step([
+                  $class: 'CopyArtifact',
+                  excludes: 'wssd-ext-tools*.zip',
+                  filter: 'wssd-*.zip',
+                  fingerprintArtifacts: true,
+                  optional: true,
+                  projectName: env.JOB_NAME,
+                  selector: [$class: 'SpecificBuildSelector',
+                            buildNumber: env.BUILD_NUMBER]
+              ])
+              script {
+                if (is_pull_request) {
+                  if ('skip_simulator_test' in pullRequest.labels.toList()) {
+                    echo "skip_simulator_test label set. Skipping simulator test."
+                    return 0
+                  }
+                }
+                dir ("simulator_test") {
+                  // Only run this if it is a pull request. Tested in when.
+                  if (is_pull_request) {
+                    // Default precommit job name.
+                    echo "Stage: ${env.STAGE_NAME}; NODE_NAME = ${env.NODE_NAME}"
+                    def simulator_job = "docker-code-review-wssd.simulator_test"
+                    distro_version = "20.04"
+                    // should be simonly lable to prevent deadlocks, comment out for testing
+                    def testbed_label = "ubuntu_1804_background || ubuntu_1804_simonly"
+                    runPrecommitTest(precommit_job:simulator_job, testbed_label:testbed_label, test_name:"Nothing", distro_version:distro_version)
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  post { 
+    aborted {
+      script {
+        // Change status if needed if the pipeline job is aborted. 
+        if (is_pull_request) {
+          for (status in pullRequest.statuses) {
+            echo "Current Commit: ${pullRequest.head}, State: ${status.state}, Context: ${status.context}, URL: ${status.targetUrl}"
+            // Set results to error for each status.
+            pullRequest.createStatus(
+              status: 'error',
+              context: status.context,
+              description: "${status.state}: Aborted in Jenkins"
+            )
+          }
+        }
+      }
+    }
+  }
+}
